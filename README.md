@@ -35,6 +35,6 @@ Don't forget to put the correct number of layers into the "firstLayersCount" and
 
 Example: <br>
 Original: <br>
-![alt text](https://github.com/RomanSichkaruk/ulp2emf/blob/master/demo2.png?raw=true)
+<img src="https://github.com/RomanSichkaruk/ulp2emf/blob/master/demo2.png" width="400" height="790">
 Generated EMF: <br>
-![alt text](https://github.com/RomanSichkaruk/ulp2emf/blob/master/demo2g-1.png?raw=true) 
+<img src="https://github.com/RomanSichkaruk/ulp2emf/blob/master/demo2g-1.png" width="400" height="790">
