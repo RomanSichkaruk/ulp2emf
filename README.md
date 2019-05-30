@@ -33,8 +33,8 @@ Setting this variable to 0 will fix it, but at the cost of lesser fidelity of th
 Normally, the program exports the layers like they are ordered in Eagle. However, EMF doesn't support transparency, so some objects on a board may become hidden under other objects. Therefore, the ULP forces some layers to be processed first and other layers last. You can change them with "firstLayers" and "lastLayers" variables (enter layer names or their numbers).
 Don't forget to put the correct number of layers into the "firstLayersCount" and "lastLayersCount" variables if you use this feature.
 
-Example:
-Original:
+Example: <br>
+Original: <br>
 ![alt text](https://github.com/RomanSichkaruk/ulp2emf/blob/master/demo2.png?raw=true)
-Generated EMF:
-![alt text](https://github.com/RomanSichkaruk/ulp2emf/blob/master/demo2g.png?raw=true)
+Generated EMF: <br>
+![alt text](https://github.com/RomanSichkaruk/ulp2emf/blob/master/demo2g.png?raw=true) 
