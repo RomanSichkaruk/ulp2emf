@@ -37,4 +37,4 @@ Example: <br>
 Original: <br>
 ![alt text](https://github.com/RomanSichkaruk/ulp2emf/blob/master/demo2.png?raw=true)
 Generated EMF: <br>
-![alt text](https://github.com/RomanSichkaruk/ulp2emf/blob/master/demo2g.png?raw=true) 
+![alt text](https://github.com/RomanSichkaruk/ulp2emf/blob/master/demo2g-1.png?raw=true) 
