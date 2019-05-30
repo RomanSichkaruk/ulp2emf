@@ -34,8 +34,8 @@ Normally, the program exports the layers like they are ordered in Eagle. However
 Don't forget to put the correct number of layers into the "firstLayersCount" and "lastLayersCount" variables if you use this feature.
 
 Example: <br>
-<p float="left">
-<img src="https://github.com/RomanSichkaruk/ulp2emf/blob/master/demo2.png" width="300" height="450" /> 
-<img src="https://github.com/RomanSichkaruk/ulp2emf/blob/master/demo2g-1.png" width="300" height="450" />
-</p>
+Original           |  Generated
+:-------------------------:|:-------------------------:
+<img src="https://github.com/RomanSichkaruk/ulp2emf/blob/master/demo2.png" width="300" height="550" />   |  <img src="https://github.com/RomanSichkaruk/ulp2emf/blob/master/demo2g-1.png" width="300" height="550" />
+
 
