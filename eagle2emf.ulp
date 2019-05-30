@@ -1,0 +1,2431 @@
+#usage "<b>EMF vector image exporting tool version 1.0</b>\n"
+       "<p>"
+       "This ULP exports EMF (Enhanced Metafile) vector images from Eagle schematics and boards. "
+       "Load any schematic or board and run the ULP. You have to manually enable or disable visible layers "
+	   "before you run the ULP. If your board contains polygons, you must use the Ratsnest command "
+	   "to process them, otherwise only their outline will be exported. "
+	   "Some export parameters are configurable, you need to edit variables in the ULP."
+       "<p>"
+       "<author>Author: Roman Sickaruk, romansichkaruk(at)gmail(dot)com<br><br>"
+       "The ULP is partially based on: <ul>"
+       "<li>eagle2svg by nils(dot)springob(at)nicai-systems(dot)de</li>"
+       "<li>sch2wmf by henrik(dot)haftmann(at)e-technik(dot)tu-chemnitz(dot)de</li>"
+	   "</ul><p>"
+       "The ULP was created as a part of master's thesis 'Program pro export vektorovych obrazku z Autodesk Eagle' "  
+       "at the Faculty of Electrical Engineering and Communication, Brno University of Technology, "
+       "thesis supervisor Pavel Hanak, hanakp(at)feec(dot)vutbr(dot)cz"
+       "<br>"
+       
+real VERSION	= 1.0; // Version of the program
+string DESCR	= "";  // Additional description
+
+
+/* ==========================================================================
+ * License: This file is released under GNU Public license Version 2. 
+ * ==========================================================================*/  
+
+// THIS PROGRAM IS PROVIDED AS IS AND WITHOUT WARRANTY OF ANY KIND, EXPRESSED OR IMPLIED
+
+// The EMF format has some quirks and limitations that prevent accurate reproduction of board layers.
+// Probably the biggest limitation is the absence of transparency, so all layers are 
+// always 100% opaque on white background. Moreover, different programs (MS Office, Adobe Illustrator, 
+// Inkscape) interpret the EMF files differently, which results in visual artefacts in some cases.
+// To combat this, there are several user-configurable variables:
+
+// Variable "roundedRectangles" is particularly useful for MS Office products, because they incorrectly
+// import roudned rectangles (they are missing if you insert the EMF file into your document).
+// Setting this variable to 0 will fix it, but at the cost of lesser fidelity of the image.
+
+// Normally, the program exports the layers like they are ordered in Eagle. However, EMF doesn't support 
+// transparency, so some objects on a board may become hidden under other objects.
+// Therefore, the ULP forces some layers to be processed first and other layers last. You can  
+// change them with "firstLayers" and "lastLayers" variables (enter layer names or their numbers).
+// Don't forget to put the correct number of layers into the "firstLayersCount" and "lastLayersCount"
+// variables if you use this feature.
+
+
+ /* ==========================================================================*/
+ /* ========          USER-CONFIGURABLE VARIABLES                   ==========*/
+ /* ==========================================================================*/
+
+/**
+ *	Background color in RGB format.
+ */
+int bkgRed=255, bkgGreen=255, bkgBlue=255;
+
+/**
+ *	If set to 0, rounded rectangles will be produced as simple rectangles.
+ */
+int roundedRectangles=1;
+
+/**
+ *  Layers to be exported first.
+ */
+int firstLayers[] = {LAYER_BOTTOM, LAYER_TOP};
+int firstLayersCount=2; // Number of layers to be exported first.
+
+/**
+ *  Layers to be exported last.
+ */
+int lastLayers[] = {LAYER_VIAS, LAYER_PADS, 51};
+int lastLayersCount=3; // Number of layers to be exported last.
+
+/**
+ * Coeficient of internal to logic units conversion.
+ * 10000 allows accuracy 0.1 um.
+ */
+int TOLOGIC=10000;
+
+/**
+ *  Flag defining if to use only current sheet or all sheets in schematic.
+ *  Edited from GUI checkbox.
+ *  Default value is defined here.
+ */
+int g_only_current_sheet = 1;
+
+/**
+ *  Flag defining if to print only visible layers.
+ *  Edited from GUI checkbox. 
+ *  Default value is defined here.
+ */
+int g_only_visible = 1;
+
+ /* ==========================================================================*/
+ /* ======== AUTOMATICALLY SET VARIABLES. DO NOT MODIFY OR SET THEM ==========*/
+ /* ==========================================================================*/
+
+/**
+ * Array with layers as indexes and 0/1 as value.
+ * 1 Means layer should be printed.
+ * 0 - Shouldn't.
+ */
+int g_used_layers[];
+
+/**
+ * Axis transfomation.
+ */
+int transformX=0;
+int transformY=0;
+
+/**
+ * Axis dimensions.
+ */
+int dimensionX=0;
+int dimensionY=0;
+
+/**
+ * Metafille buffer.
+ * Data are saved into it in order to get size in bytes.
+ */
+char fileContent[];
+int fileContentSize=0; // Size of metafile buffer.
+
+/**
+ * Number of records in metafile.
+ */
+int recordsCount=0;
+
+/**
+ * Currently processed layer.
+ */
+int current_layer=0; 
+
+/**
+ *  Last set color of a pen.
+ */
+int lastColorPen=-2;
+
+/**
+ *  Last set width of a pen.
+ */
+int lastWidthPen=-2;
+
+/**
+ *  Last set color of a brush.
+ */
+int lastColorBrush=-2;
+
+/**
+ * Defined value for select object record.
+ */
+int EMR_SELECTOBJECT=0x00000025;
+
+/**
+ * Defined value for delete object record.
+ */
+int EMR_DELETEOBJECT=0x00000028;
+
+//--------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------
+//--------------------------------------------------------------------------------------
+
+/**
+ * Makes division of two integers in order to get decimal
+ * @param a - devident
+ * @param b - devisor
+ * @return 
+ */
+real intDivToReal(int a, int b){
+    if(b==0) return 0;	
+    real ar=a;
+    real br=b;
+    return ar/br;
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Transformation of x coord
+ */
+int pointTransformX(int x){	
+	return x+transformX;
+}
+//---------------------------------------------------------------------------------------   
+
+/**
+ * Transformation of y coord
+ * Rotation over y axis is aplied
+ */
+int pointTransformY(int y){
+	return dimensionY - (y+transformY);
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Rotates point around another point and returns X-coordinate
+ * @param x - x coord of point to be rotated
+ * @param y - y coord of point to be rotated
+ * @param cx - x coord of point of rotation center
+ * @param cy  - y coord of point of rotation center
+ * @param angle - angle to rotate by
+ * @return 
+ */
+int rotatePointX(int x, int y, int cx, int cy, real angle)
+{ 
+    return ((x-cx)*cos(angle*PI/180) - (y-cy)*sin(angle*PI/180))+cx;
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Rotates point around another point and returns Y-coordinate
+ * @param x - x coord of point to be rotated
+ * @param y - y coord of point to be rotated
+ * @param cx - x coord of point of rotation center
+ * @param cy  - y coord of point of rotation center
+ * @param angle - angle to rotate by
+ * @return 
+ */
+int rotatePointY(int x, int y, int cx, int cy, real angle)
+{ 
+    return ((x-cx)*sin(angle*PI/180) + (y-cy)*cos(angle*PI/180))+cy;
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Tramsforms internal units to logic units.
+ * First transforms to mm and then power by accuracy TOLOGIC
+ * f.e. if TOLOGIC is 10000 => accuracy = 0.1 um
+ * @param x - value in internal units 
+ * @return 
+ */
+int u2logic(int x){
+    int logicUnits=u2mm(x)*TOLOGIC;
+    return logicUnits;
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Prints word to metafile
+ * @param w - Integer, 2 least bytes are taken as word.
+ */
+void PrintWord(int w) {
+    printf("%c%c",w&0xFF,(w>>8)&0xFF);
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Prints word to string and returns it
+ * @param w - Integer, 2 least bytes are taken as word.
+ * @return 
+ */
+string PrintWordToString(int w){
+    string toReturn;
+    sprintf(toReturn, "%c%c",w&0xFF,(w>>8)&0xFF);
+    return toReturn;
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Prints word to metafile buffer
+ * @param w - Integer, 1 least bytes are taken as word.
+ */
+void PrintByteToFileContent(int w) {
+    fileContent[fileContentSize++]=w&0xFF;
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Prints word to metafile buffer
+ * @param w - Integer, 2 least bytes are taken as word.
+ */
+void PrintWordToFileContent(int w) {
+    fileContent[fileContentSize++]=w&0xFF;
+    fileContent[fileContentSize++]=(w>>8)&0xFF;
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Prints double word to metafile buffer.
+ * @param dw - Integer to be saved.
+ */
+void PrintDWordToFileContent(int dw) {
+    fileContent[fileContentSize++]=dw&0xFF;
+    fileContent[fileContentSize++]=(dw>>8)&0xFF;
+    fileContent[fileContentSize++]=(dw>>16)&0xFF;
+    fileContent[fileContentSize++]=((dw>>16)>>8)&0xFF;
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Prints double word to metafile. 
+ * @param dw - Integer to be saved.
+ */
+void PrintDWord(int dw) {
+    PrintWord(dw);
+    PrintWord(dw>>16);
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Prints color to metafile.
+ * Transparency isnt supported.
+ * @param r - value of red component
+ * @param g - value of green component
+ * @param b - value of blue component * 
+ */
+void printColorToFile(int r, int g, int b){
+    PrintDWordToFileContent((r) + (g << 8) + (b  << 16));
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Saves ULP color to metafile.
+ * 2. the most valuable octet of ULP color is the least valuable octet of EMF color and vice-versa. * 
+ * @param color
+ */
+void printColor(int color){
+    int red = color >> 16;
+    int green = (color >> 8) & 0xff;
+    int blue = color & 0xff;
+    printColorToFile(red,green,blue);
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Selects object (pen, brush)
+ * @param index - index to global objects table.
+ */
+void selectObject(int index){
+    PrintDWordToFileContent(EMR_SELECTOBJECT);
+    PrintDWordToFileContent(0x0000000C);
+    PrintDWordToFileContent(index);
+    recordsCount++;
+}
+//---------------------------------------------------------------------------------------
+/**
+ * Deletes object (pen, brush)
+ * @param index - index to global objects table.
+ */
+void deleteObject(int index){
+    PrintDWordToFileContent(EMR_DELETEOBJECT); 
+    PrintDWordToFileContent(0x0000000C);
+    PrintDWordToFileContent(index);
+    recordsCount++;
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Set color for brush or pen
+ * @param layer - ULP layer to get color from. If not found - white is set.
+ */
+void setColor(int layer){
+    if (schematic){
+        schematic(SCH){
+            SCH.layers(Lay){
+                // iterates over schematic layers till finds the arg one
+                if(layer == Lay.number){
+                    printColor(palette(Lay.color)&0x00ffffff); // alpha part of rgba is ignored
+                    return;
+                }
+            }
+        }
+        // If not found, sets white
+        printColorToFile(bkgRed,bkgGreen,bkgBlue);
+    }
+    else{
+        board(B){
+            // iterates over boards layers till finds the arg one
+            B.layers(Lay){
+                if(layer == Lay.number){
+                    printColor(palette(Lay.color)&0x00ffffff); // alpha part of rgba is ignored
+                    return;
+                }
+            }
+        }
+        // If not found, sets white
+        printColorToFile(bkgRed,bkgGreen,bkgBlue);
+    }
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Sets current pen
+ * @param layer - layer, defines color of a pen
+ * @param width - width of a pen
+ */
+void setPen(int layer, int width)
+{
+    // if pen is already set, no need to duplicate    
+    if(layer == lastColorPen && lastWidthPen == width) return;
+
+    lastColorPen=layer;
+    lastWidthPen=width;
+    
+    // Select default pen
+    selectObject(0x80000007);   
+
+    //DELETE old pen
+    deleteObject(0x00000002);
+
+    //CREATE new PEN
+    PrintDWordToFileContent(0x00000026);
+    PrintDWordToFileContent(0x0000001C);
+    PrintDWordToFileContent(0x00000002);
+
+    //STYLE PEN
+    PrintDWordToFileContent(0x00010000);
+
+    //WIDTH
+    PrintDWordToFileContent(u2logic(width));
+
+    //HEIGHT
+    PrintDWordToFileContent(0x00000000);
+
+    // set COLOR
+    setColor(layer);
+    recordsCount++;
+
+    //SELECT it
+    selectObject(0x00000002);	
+}
+//-----------------------------------------------------------------
+
+/**
+ * Sets brush
+ * @param layer - layer, defines color of a brush
+ */
+void setBrush(int layer){
+    if(layer == lastColorBrush) return;
+
+    // used for transparent color (not filled objects)
+    if(layer == -1){
+        deleteObject(0x00000001);
+        selectObject(0x80000005);
+    }else{
+        //DELETE old
+        deleteObject(0x00000001);
+
+        // EMR_CREATEBRUSHINDIRECT !!!
+        PrintDWordToFileContent(0x00000027);
+        PrintDWordToFileContent(0x00000018);
+        PrintDWordToFileContent(0x00000001);
+        PrintDWordToFileContent(0x00000000);
+
+        // set COLOR
+        setColor(layer);
+        PrintDWordToFileContent(0x00000000);
+        recordsCount++;
+
+        // EMR_SELECTOBJECT  !!!
+        selectObject(0x00000001);
+    }
+    lastColorBrush=layer;
+}
+//-------------------------------------------------------------------------------------------------------
+
+/**
+ * Writes octagon polygon
+ * @param diameter of the octagon
+ * @param cx - x component of octagon center 
+ * @param cy - y component of octagon center 
+ * @param angle - angle to rotate octagon 
+ * @param layer - layer of the octagon
+ */
+void emfWritePolygonOctagon(int diameter, int cx, int cy, real angle, int layer)
+{
+    int a = diameter/ (sqrt(4+2*sqrt(2)));   // get side length
+    int e = a * (1+sqrt(2)); // get medium diagonal
+
+    // 8 points
+    int x[] = {cx-e/2, cx-e/2, cx-a/2, cx+a/2, cx+e/2, cx+e/2,cx+a/2, cx-a/2};
+    int y[] = {cy-a/2, cy+a/2, cy+e/2, cy+e/2, cy+a/2, cy-a/2, cy-e/2, cy-e/2};
+
+    // Set pen/brush
+    setPen(layer, 10*TOLOGIC);
+    setBrush(layer);
+
+    int left=INT_MAX;
+    int right=INT_MIN;
+    int top=INT_MIN;
+    int bottom=INT_MAX;
+
+    // Transform points to logic units and get boundaries
+    for(int i = 0; i < 8; i++){
+        int xToRem=x[i];
+        x[i]=u2logic(rotatePointX(x[i], y[i], cx,cy, angle) +transformX);
+        y[i]=u2logic(dimensionY - (rotatePointY(xToRem, y[i], cx,cy, angle) +transformY));
+
+        left = min(left, x[i]);
+        right=max(right, x[i]);
+        top=max(top, y[i]);
+        bottom=min(bottom, y[i]);
+    }
+
+    PrintDWordToFileContent(0x00000003); // EMR_POLYGON
+    PrintDWordToFileContent((8)*8+28); // size = 8points + 28B base size
+
+    // Bounding rect
+    PrintDWordToFileContent(left);
+    PrintDWordToFileContent(top);
+    PrintDWordToFileContent(right);
+    PrintDWordToFileContent(bottom);
+
+    //Number of points
+    PrintDWordToFileContent(8);
+
+    // Print poins in right order
+    for(i = 0; i < 8; i++){
+            PrintDWordToFileContent(x[i]);
+            PrintDWordToFileContent(y[i]);
+    }
+    recordsCount++;
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Creates polygon that is simple rectangle.
+ * @param x1 - x value of left top point
+ * @param y1 - y value of left top point
+ * @param x2 - x value of left bottom point
+ * @param y2 - y value of left bottom point
+ * @param x3 - x value of right bottom point
+ * @param y3 - y value of right bottom point
+ * @param x4 - x value of right top point
+ * @param y4 - y value of right top point
+ */
+void emfWritePolygonRect4(int x1, int y1, int x2, int y2, 
+    int x3, int y3, int x4, int y4){
+
+    // Get true bounding box + convert to logic units
+    int left=u2logic(min(x1, min(x2,min(x3, x4))) +transformX);
+    int right=u2logic(max(x1, max(x2,max(x3, x4))) +transformX);
+    int top=u2logic(dimensionY -max(y1, max(y2,max(y3, y4))) -transformY);
+    int bottom=u2logic(dimensionY -min(y1, min(y2,min(y3, y4))) -transformY);
+
+    PrintDWordToFileContent(0x00000003); // EMR_POLYGON 
+    PrintDWordToFileContent((4)*8+28); // 4 points + 28B of base size
+
+    // Bounding rectangle
+    PrintDWordToFileContent(left);
+    PrintDWordToFileContent(top);
+    PrintDWordToFileContent(right);
+    PrintDWordToFileContent(bottom);
+
+    // Count of points
+    PrintDWordToFileContent(4);
+
+    // Left top point transformed
+    PrintDWordToFileContent(u2logic(x1 +transformX));
+    PrintDWordToFileContent(u2logic(dimensionY - y1 -transformY));
+
+    // Left bottom point transformed
+    PrintDWordToFileContent(u2logic(x2 +transformX));
+    PrintDWordToFileContent(u2logic(dimensionY - y2 -transformY));
+
+    // Right bottom point transformed
+    PrintDWordToFileContent(u2logic(x3 +transformX));
+    PrintDWordToFileContent(u2logic(dimensionY - y3 -transformY));
+
+    // Right top point transformed
+    PrintDWordToFileContent(u2logic(x4 +transformX));
+    PrintDWordToFileContent(u2logic(dimensionY - y4 -transformY));
+
+    recordsCount++;
+}
+//-----------------------------------------------------------------
+
+/**
+ * Creates polygon that is simple rectangle.
+ * Used to draw rectangles with non-ortogonal angles
+ * @param l - left x coord
+ * @param t - top y coord
+ * @param r - right x coord
+ * @param b - bottom y coord
+ * @param angle - rotation angle
+ */
+void emfWritePolygonRect(int l, int t, int r, int b, real angle)
+{
+    // Save true bounding rectangle points
+    int left=min(l, r);
+    int right=max(l, r);
+    int top=max(t,b);
+    int bottom=min(t, b);
+
+    // Center point 
+    int cx=left + (right-left)/2;
+    int cy=bottom + (top-bottom)/2;
+
+    // Rotate points around rotation point (center)
+    int tlx=u2logic(rotatePointX(left, top, cx,cy, angle) +transformX);
+    int tly=u2logic(dimensionY - (rotatePointY(left, top, cx,cy, angle) +transformY));
+
+    int trx=u2logic(rotatePointX(right, top, cx,cy, angle) +transformX);
+    int try=u2logic(dimensionY - (rotatePointY(right, top, cx,cy, angle) +transformY));
+
+    int blx=u2logic(rotatePointX(left, bottom, cx,cy, angle) +transformX);
+    int bly=u2logic(dimensionY - (rotatePointY(left, bottom, cx,cy, angle) +transformY));
+
+    int brx=u2logic(rotatePointX(right, bottom, cx,cy, angle) +transformX);
+    int bry=u2logic(dimensionY - (rotatePointY(right, bottom, cx,cy, angle) +transformY));
+
+    PrintDWordToFileContent(0x00000003); // EMR_POLYGON
+    PrintDWordToFileContent((4)*8+28);    
+
+    // Save bounding rectangle
+    PrintDWordToFileContent(min(min(min(trx, tlx), brx),blx));
+    PrintDWordToFileContent(max(max(max(try, tly), bry),bly));
+    PrintDWordToFileContent(max(max(max(trx, tlx), brx),blx));
+    PrintDWordToFileContent(min(min(min(try, tly), bry),bly));
+
+    // Points count
+    PrintDWordToFileContent(4);
+
+    // Individual points in right order
+    PrintDWordToFileContent(tlx);
+    PrintDWordToFileContent(tly);
+
+    PrintDWordToFileContent(trx);
+    PrintDWordToFileContent(try);
+
+    PrintDWordToFileContent(brx);
+    PrintDWordToFileContent(bry);
+
+    PrintDWordToFileContent(blx);
+    PrintDWordToFileContent(bly);
+
+    recordsCount++;
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Writes UL_POLYGON constructed from partial polygons to metafile
+ * @param P - UL_POLYGON to be written
+ */
+void emfWritePolyPolygon(UL_POLYGON P)
+{
+    // np = number of partial polygons, nk = array holding number of points of
+    // each partial polygon, x0 and y0 = start points of last partial polygon
+    int np=0,nk[],n=0,x0,y0;
+    nk[0]=0;
+    int count = 0; // total number of points
+
+    // Get partial polygons count
+    P.contours(W) {
+        if (!nk[np]) x0=W.x1, y0=W.y1;	
+        nk[np]++;	
+        n++;		
+        if (x0==W.x2 && y0==W.y2){
+        nk[++np]=0;	
+        } 
+        count++;
+    }
+
+    
+    int left=INT_MAX, right=INT_MIN, top=INT_MIN, bottom=INT_MAX;
+    
+    // Get bounding rectangle
+    P.contours(W)
+    {
+        left=min(left,min(W.x1, W.x2));
+        right=max(right,max(W.x1, W.x2));
+        top=max(top,max(W.y1, W.y2));
+        bottom=min(bottom,min(W.y1, W.y2));
+    }
+
+    // Convert to logic units + transform
+    left=u2logic(left+transformX);
+    right=u2logic(right+transformX);	
+    bottom=u2logic(dimensionY - (bottom+transformY));
+    top=u2logic(dimensionY - (top+transformY));
+
+    // if total number of points is > 2 write record
+    if (count > 2)
+    {
+        PrintDWordToFileContent(0x00000008);       // EMR_POLYPOLYGON
+        PrintDWordToFileContent((count)*8+32+4*np); // Total size
+
+        // Bounding rectanle
+        PrintDWordToFileContent(left);
+        PrintDWordToFileContent(top);
+        PrintDWordToFileContent(right);
+        PrintDWordToFileContent(bottom);
+
+        PrintDWordToFileContent(np); //Number of partial polygons
+        PrintDWordToFileContent(count); //Total number of points
+        
+        // Print individual number of points in each partial polygon
+        for (n=0; n<np; n++){
+                PrintDWordToFileContent(nk[n]);
+        } 
+
+        // Print points
+        P.contours(W)
+        {
+            PrintDWordToFileContent(u2logic(W.x1+transformX));
+            PrintDWordToFileContent(u2logic(dimensionY - (W.y1+transformY)));
+        }
+        recordsCount++;
+    }
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Writes UL_POLYGON containing only one partial polygon
+ * @param P
+ */
+void emfWriteSimplePolygon(UL_POLYGON P)
+{
+    int count = 0; // total count of points
+    
+    // Set pen and brush
+    setPen(P.layer, P.width);
+
+    int fillingsCount=0;
+    P.fillings(W)
+    {
+    	fillingsCount++;
+    }
+    if(fillingsCount)
+    	setBrush(P.layer);
+    else{
+    	setBrush(-1);
+    }
+
+    // Get bounding rectangle
+    int left=INT_MAX;
+    int right=INT_MIN;
+    int top=INT_MIN;
+    int bottom=INT_MAX;
+
+    P.contours(W)
+    {
+        left=min(left,min(W.x1, W.x2));
+        right=max(right,max(W.x1, W.x2));
+        top=max(top,max(W.y1, W.y2));
+        bottom=min(bottom,min(W.y1, W.y2));
+        ++count;
+    }
+
+    // Transform and convert to logic units
+    left=u2logic(left+transformX);
+    right=u2logic(right+transformX);
+    bottom=u2logic(dimensionY - (bottom+transformY));
+    top=u2logic(dimensionY - (top+transformY));
+
+    
+    if (count > 2)
+    {
+        PrintDWordToFileContent(0x00000003);
+        PrintDWordToFileContent((count)*8+28);
+
+        // Write bounding rectangle
+        PrintDWordToFileContent(left);
+        PrintDWordToFileContent(top);
+        PrintDWordToFileContent(right);
+        PrintDWordToFileContent(bottom);
+
+        // Write count of points
+        PrintDWordToFileContent(count);
+        
+        int backwards=count;
+        
+        // Write points, ignore the end point
+        P.contours(W)
+        {
+            if(backwards==count){
+                PrintDWordToFileContent(u2logic(W.x1+transformX));
+                PrintDWordToFileContent(u2logic(dimensionY - (W.y1+transformY)));
+            }
+            if(backwards!=1){
+                PrintDWordToFileContent(u2logic(W.x2+transformX));
+                PrintDWordToFileContent(u2logic(dimensionY - (W.y2+transformY)));
+            }
+            backwards--;
+        }
+        recordsCount++;
+    }
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Write polygon.
+ * If UL_POLYGON consists from one partial polygon, calls emfWriteSimplePolygon,
+ * else => emfWritePolyPolygon
+ * @param P
+ */
+void emf_write_polygon(UL_POLYGON P)
+{
+    if(P.layer != current_layer || g_used_layers[P.layer] == 0) return;
+    setPen(P.layer, P.width);
+
+    if(!schematic){
+        setBrush(P.layer);
+    }
+    else{
+        PrintDWordToFileContent(EMR_DELETEOBJECT); 
+        PrintDWordToFileContent(0x0000000C);
+        PrintDWordToFileContent(0x00000001);
+        recordsCount++;
+        PrintDWordToFileContent(EMR_SELECTOBJECT);
+        PrintDWordToFileContent(0x0000000C);
+        PrintDWordToFileContent(0x80000005);	
+        recordsCount++;
+    }
+
+    int np=0,nk[],n=0,x0,y0;
+    nk[0]=0;
+
+    P.contours(W) {
+        if (!nk[np]) x0=W.x1, y0=W.y1;	
+        nk[np]++;	
+        n++;		
+      if (x0==W.x2 && y0==W.y2) nk[++np]=0;	
+    }
+
+    if (np==1) {
+      emfWriteSimplePolygon(P);
+    }
+    else{
+      emfWritePolyPolygon(P);
+    }
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Writes dot (filled circle) to metafile.
+ * @param x - x coord of center point in logic units.
+ * @param y - y coord of center point in logic units.
+ * @param diameter - circle diameter in logic units.
+ * @param layer - layer of the dot.
+ */
+void emfWriteDotLog(int x, int y, int diameter, int layer)
+{
+	
+    int radius=diameter/2;
+    setPen(layer, 0);
+    setBrush(layer);
+	
+    // elipse
+    PrintDWordToFileContent(0x0000002A); // EMR_ELIPSE	
+    PrintDWordToFileContent(0x00000018); // size
+
+    // Bounding rectangle points
+    int x1 = x - radius;
+    int x2 = x + radius;
+    int y1 = y - radius;
+    int y2 = y + radius;
+
+    int rectLeft=min(x1,x2);
+    int rectRight=max(x1,x2);
+    int rectTop=max(y1,y2);
+    int rectBottom=min(y1,y2);
+
+    // Write elipse bbox
+    PrintDWordToFileContent(rectLeft);	
+    PrintDWordToFileContent(rectTop);	
+    PrintDWordToFileContent(rectRight);	
+    PrintDWordToFileContent(rectBottom);
+
+    recordsCount++;
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Writes dot (filled circle) to metafile.
+ * @param x - x coord of center point in internal units.
+ * @param y - y coord of center point in internal units.
+ * @param diameter - circle diameter in internal units.
+ * @param layer - layer of the dot.
+ */
+void emfWriteDot(int x, int y, int diameter, int layer)
+{
+	
+    int radius=diameter/2;
+    setPen(layer, 0);
+    setBrush(layer);
+
+    // elipse
+    PrintDWordToFileContent(0x0000002A);	
+    PrintDWordToFileContent(0x00000018);
+
+    // Bounding rectangle points
+    int x1 = x - radius;
+    int x2 = x + radius;
+    int y1 = y - radius;
+    int y2 = y + radius;
+
+    // Transform + convert to logic units
+    int x1tosave=u2logic(x1+transformX);
+    int x2tosave=u2logic(x2+transformX);
+
+    int y1tosave=u2logic(dimensionY - (y1+transformY));
+    int y2tosave=u2logic(dimensionY - (y2+transformY));
+
+    
+    int rectLeft=min(x1tosave,x2tosave);
+    int rectRight=max(x1tosave,x2tosave);
+    int rectTop=max(y1tosave,y2tosave);
+    int rectBottom=min(y1tosave,y2tosave);
+
+    // Write bbox
+    PrintDWordToFileContent(rectLeft);	
+    PrintDWordToFileContent(rectTop);	
+    PrintDWordToFileContent(rectRight);	
+    PrintDWordToFileContent(rectBottom);
+
+    recordsCount++;
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Prints rounded rectangle to a metafile
+ * @param x1 - left coord
+ * @param y1 - top coord
+ * @param x2 - right coord
+ * @param y2 - bottom coord
+ * @param angle - rotation angle
+ * @param layer - specifies color
+ * @param roundness - <0,100>% specifies how much corners are rounded
+ */
+void emfWriteRoundedRect(int x1, int y1, int x2, int y2, real angle, int layer, int roundness)
+{
+    if(layer != current_layer) return;
+
+    setBrush(layer);
+    setPen(layer, 0);
+
+    // Check for angle ortogonality
+    real angleTmp=angle;
+    while(angleTmp > 0 && angleTmp!=0){
+        angleTmp=angleTmp - 90;
+    }
+
+    if(angleTmp < 0 || roundedRectangles == 0){
+        emfWritePolygonRect(x1, y1, x2, y2, angle);
+        return;
+    }
+
+    PrintDWordToFileContent(0x0000002C); // EMR_ROUNDRECT	
+    PrintDWordToFileContent(0x00000020);
+
+    // Convert internal units to logic
+    int x1tosave=u2logic(x1+transformX);
+    int x2tosave=u2logic(x2+transformX);
+    int y1tosave=u2logic(dimensionY - (y1+transformY));
+    int y2tosave=u2logic(dimensionY - (y2+transformY));
+
+    // Get Bounding rectange points
+    int rectLeft=min(x1tosave,x2tosave);
+    int rectRight=max(x1tosave,x2tosave);
+    int rectTop=max(y1tosave,y2tosave);
+    int rectBottom=min(y1tosave,y2tosave);
+
+    // Bounding rectangle center
+    int rectCenterX = (rectLeft+rectRight)/2;
+    int rectCenterY = (rectTop+rectBottom)/2;
+
+    // Bounding rectangle points rotation
+    int rectLeftRotated = rotatePointX(rectLeft, rectTop, rectCenterX, rectCenterY, angle);
+    int rectTopRotated = rotatePointY(rectLeft, rectTop, rectCenterX, rectCenterY, angle);
+    int rectRightRotated = rotatePointX(rectRight, rectBottom, rectCenterX, rectCenterY, angle);
+    int rectBottomRotated = rotatePointY(rectRight, rectBottom, rectCenterX, rectCenterY, angle);
+
+    // Saving bounding rectangle
+    PrintDWordToFileContent(min(rectLeftRotated,rectRightRotated));	
+    PrintDWordToFileContent(max(rectTopRotated,rectBottomRotated));	
+    PrintDWordToFileContent(max(rectLeftRotated,rectRightRotated));	
+    PrintDWordToFileContent(min(rectTopRotated,rectBottomRotated));
+
+    int width=abs(rectRightRotated-rectLeftRotated);  // Width of the rectangle
+    int height=abs(rectTopRotated-rectBottomRotated); // height of the rectangle
+
+    real ratio = height;
+    ratio=ratio/width;   // height to width ratio
+
+    // If height is bigger than width, width must be multiplied by 1/ratio
+    if(width < height){
+        PrintDWordToFileContent((roundness*width)/100);	
+        PrintDWordToFileContent((roundness*height/ratio)/100);
+    } // If width is bigger than height, height must be multiplied by 1/ratio
+    else{
+        PrintDWordToFileContent((roundness*width*ratio)/100);	
+        PrintDWordToFileContent((roundness*height)/100);
+    }
+
+    recordsCount++;	
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Writes rectangle to metafile.
+ * If rotation angle isnt ortogonal, writes rectangle as polygon
+ * @param x1 - left coord
+ * @param y1 - top coord
+ * @param x2 - right coord
+ * @param y2 - bottom coord
+ * @param angle - rotation angle
+ * @param layer 
+ */
+void emfWriteRect(int x1, int y1, int x2, int y2, real angle, int layer)
+{
+	if(layer != current_layer ) {return;}
+
+	setBrush(layer);
+	setPen(layer, 100);
+
+        // Check if angle is ortogonal
+	real angleTmp=angle;
+	while(angleTmp > 0 && angleTmp!=0){
+		angleTmp=angleTmp - 90;
+	}
+
+	if(angleTmp < 0){
+            emfWritePolygonRect(x1, y1, x2, y2, angle);
+            return;
+	}
+	
+	PrintDWordToFileContent(0x0000002B); // EMR_RECTANGLE
+	PrintDWordToFileContent(0x00000018);
+	
+        // Convert to logic units + transform
+	int x1tosave=u2logic(x1+transformX);
+	int x2tosave=u2logic(x2+transformX);
+	
+	int y1tosave=u2logic(dimensionY - (y1+transformY));
+	int y2tosave=u2logic(dimensionY - (y2+transformY));
+	
+        // Bounding rectangle points
+	int rectLeft=min(x1tosave,x2tosave);
+	int rectRight=max(x1tosave,x2tosave);
+	int rectTop=max(y1tosave,y2tosave);
+	int rectBottom=min(y1tosave,y2tosave);
+
+        // Bounding rectangle center
+	int rectCenterX = (rectLeft+rectRight)/2;
+	int rectCenterY = (rectTop+rectBottom)/2;
+	
+        // Rotate bounding box corners
+	int rectLeftRotated = rotatePointX(rectLeft, rectTop, rectCenterX, rectCenterY, angle);
+	int rectTopRotated = rotatePointY(rectLeft, rectTop, rectCenterX, rectCenterY, angle);
+	
+	int rectRightRotated = rotatePointX(rectRight, rectBottom, rectCenterX, rectCenterY, angle);
+	int rectBottomRotated = rotatePointY(rectRight, rectBottom, rectCenterX, rectCenterY, angle);
+	
+        // Save bbox
+	PrintDWordToFileContent(rectLeftRotated);	
+	PrintDWordToFileContent(rectTopRotated);	
+	PrintDWordToFileContent(rectRightRotated);	
+	PrintDWordToFileContent(rectBottomRotated);
+	recordsCount++;	
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Prints Line to metafile
+ * @param x1
+ * @param y1
+ * @param x2
+ * @param y2
+ * @param layer
+ * @param width
+ */
+void emfWriteLine(int x1, int y1, int x2, int y2, int layer, int width)
+{
+    setPen(layer, width);
+
+    // Line vector
+    real uVectx = (x2 - x1);
+    real uVecty = (y2 - y1);    
+
+    real vector = sqrt((uVectx*uVectx)+(uVecty*uVecty));
+
+    if(vector == 0) return;
+
+    uVectx=uVectx/vector;
+    uVecty=uVecty/vector;
+
+    // Original points
+    int x1tosave = x1;
+    int y1tosave = y1;
+    int x2tosave = x2;
+    int y2tosave = y2;  
+    int nocut=1;
+
+    int angle=atan(intDivToReal((y2-y1),(x2-x1)))*180/PI;
+
+    // Shorten line from each size by width/2
+    if(vector >= width ){
+        x1tosave = x1+ uVectx* (width/2.0);
+        y1tosave = y1+ uVecty* (width/2.0);
+        x2tosave = x2- uVectx* (width/2.0);
+        y2tosave = y2- uVecty* (width/2.0); 
+        nocut=0;
+    } 	
+
+    // Save shortened and transformed + converted points
+    int x1tosaveLog=u2logic(x1tosave+transformX);
+    int x2tosaveLog=u2logic(x2tosave+transformX);
+    int y1tosaveLog=u2logic(dimensionY - (y1tosave+transformY));
+    int y2tosaveLog=u2logic(dimensionY - (y2tosave+transformY));
+
+    // Transform + convert orinal points
+    int x1tosavePuv = u2logic(x1+transformX);
+    int y1tosavePuv = u2logic(dimensionY - (y1+transformY));
+    int x2tosavePuv = u2logic(x2+transformX);
+    int y2tosavePuv = u2logic(dimensionY - (y2+transformY));
+
+    // Bounding box
+    int rectLeft=min(x1tosaveLog,x2tosaveLog);
+    int rectRight=max(x1tosaveLog,x2tosaveLog);
+    int rectTop=max(y1tosaveLog,y2tosaveLog);
+    int rectBottom=min(y1tosaveLog,y2tosaveLog);
+
+    // If line wasnt shortened => length < width
+    if(nocut==1){
+        // Normal vector
+        real uVectxn = (y2 - y1);
+        real uVectyn = (x1 - x2); 
+        real vectorN = sqrt((uVectxn*uVectxn)+(uVectyn*uVectyn));
+        uVectxn=uVectxn/vectorN;
+        uVectyn=uVectyn/vectorN;
+
+        setPen(layer, 1);
+        setBrush(layer);
+        // Print rectangle. Corners are retrieve by adding multiplies of norm. vector and width/2
+        emfWritePolygonRect4(x1+uVectxn* (width/2.0), y1+uVectyn* (width/2.0),
+        x2+uVectxn* (width/2.0), y2+uVectyn* (width/2.0),
+        x2-uVectxn* (width/2.0), y2-uVectyn* (width/2.0),
+        x1-uVectxn* (width/2.0), y1-uVectyn* (width/2.0));
+    }
+    else if(x1tosave == x2tosave && y1tosave == y2tosave){ //if length == width and one point remains after shorten
+        // Draw rectangle
+        emfWriteRect(x1tosave-width/2, y1tosave+width/2, x2tosave+width/2,
+                             y2tosave-width/2,angle, layer);
+    }
+    else{
+        // Draw shortened line
+        PrintDWordToFileContent(0x00000004);	
+        PrintDWordToFileContent(0x0000002C);
+        
+        // BBOX
+        PrintDWordToFileContent(rectLeft);	
+        PrintDWordToFileContent(rectTop);	
+        PrintDWordToFileContent(rectRight);	
+        PrintDWordToFileContent(rectBottom);
+
+        // Number of points
+        PrintDWordToFileContent(0x00000002);	
+
+        // Start point
+        PrintDWordToFileContent(x1tosaveLog);	
+        PrintDWordToFileContent(y1tosaveLog);	
+
+        // End point
+        PrintDWordToFileContent(x2tosaveLog);	
+        PrintDWordToFileContent(y2tosaveLog);
+        recordsCount++;
+    }
+
+    // Print two circles in original start and end points
+    emfWriteDotLog(x1tosavePuv, y1tosavePuv, u2logic(width), layer);
+    emfWriteDotLog(x2tosavePuv, y2tosavePuv, u2logic(width), layer);
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Print Arc to metafile
+ * @param x1 - x coord of start point
+ * @param y1 - y coord of start point
+ * @param x2 - x coord of end point
+ * @param y2 - y coord of end point
+ * @param radius
+ * @param layer
+ * @param width - pen width
+ * @param angle1 - start angle
+ * @param angle2 - end angle
+ * @param xc - x coord of arc center point 
+ * @param yc - y coord of arc center point 
+ */ 
+void emfWriteArc(int x1, int y1, int x2, int y2, int radius, int layer, int width, real angle1, real angle2, int xc, int yc)
+{
+    if(layer != current_layer ) {return;}
+    setPen(layer, width);
+
+    // Transform all points and convert to logic units
+    int x1tosave=u2logic(x1+transformX);
+    int x2tosave=u2logic(x2+transformX);
+    int xctosave=u2logic(xc+transformX);
+
+    int y1tosave=u2logic(dimensionY - (y1+transformY));
+    int y2tosave=u2logic(dimensionY - (y2+transformY));
+    int yctosave=u2logic(dimensionY - (yc+transformY));
+
+    
+    PrintDWordToFileContent(0x0000002D);	 // EMR_ARC
+    PrintDWordToFileContent(0x00000028);
+    
+    // Saving arc bbox    
+    PrintDWordToFileContent(xctosave-u2logic(radius));	
+    PrintDWordToFileContent(yctosave-u2logic(radius));	
+    PrintDWordToFileContent(xctosave+u2logic(radius));	
+    PrintDWordToFileContent(yctosave+u2logic(radius));	
+
+    // Saving arc start point
+    PrintDWordToFileContent(x1tosave);	
+    PrintDWordToFileContent(y1tosave);	
+    
+    // Saving arc end point
+    PrintDWordToFileContent(x2tosave);	
+    PrintDWordToFileContent(y2tosave);	
+    recordsCount++;
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Prints circle.
+ * Transparent brush is used.
+ * @param x - x coord of center point
+ * @param y - y coord of center point
+ * @param radius 
+ * @param lwidth - width of a pen
+ * @param layer - specifies color
+ */
+void emfWriteCircle(int x, int y, int radius, int lwidth, int layer)
+{
+    if(layer != current_layer) {return;}
+
+    // print dot if width of pen is zero
+    if (lwidth == 0)
+    {
+        emfWriteDot(x, y, 2*radius, layer);
+        return;
+    }
+
+    setPen(layer, lwidth);
+    setBrush(-1); // transparent brush
+
+    // elipse
+    PrintDWordToFileContent(0x0000002A);	
+    PrintDWordToFileContent(0x00000018);
+    
+    // Elipse BBOX
+    int x1 = x - radius;
+    int x2 = x + radius;
+    int y1 = y - radius;
+    int y2 = y + radius;
+    
+    // Transform + convert to logic units
+    int x1tosave=u2logic(x1+transformX);
+    int x2tosave=u2logic(x2+transformX);
+    int y1tosave=u2logic(dimensionY - (y1+transformY));
+    int y2tosave=u2logic(dimensionY - (y2+transformY));
+
+    // Get Elipse BBOX - left-top and bottom-right points
+    int rectLeft=min(x1tosave,x2tosave);
+    int rectRight=max(x1tosave,x2tosave);
+    int rectTop=max(y1tosave,y2tosave);
+    int rectBottom=min(y1tosave,y2tosave);
+
+    // Save BBOX to metafile
+    PrintDWordToFileContent(rectLeft);	
+    PrintDWordToFileContent(rectTop);	
+    PrintDWordToFileContent(rectRight);	
+    PrintDWordToFileContent(rectBottom);
+
+    recordsCount++;
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Print Line for text processing
+ * @param x1 - x coord of start point
+ * @param y1 - y coord of start point
+ * @param x2 - x coord of end point
+ * @param y2 - y coord of end point
+ * @param layer - specifies color
+ * @param width - pen width
+ */
+void emfWritePathLine(int x1, int y1, int x2, int y2, int layer, int width)
+{
+	
+    if(layer != current_layer || g_used_layers[layer] == 0) return;
+
+    setPen(layer, width);    
+
+    // LINE
+    PrintDWordToFileContent(0x00000004);	
+    PrintDWordToFileContent(0x0000002C);
+
+    // Convert transformed points to logic units
+    int x1tosave=u2logic(x1+transformX);
+    int x2tosave=u2logic(x2+transformX);
+    int y1tosave=u2logic(dimensionY - (y1+transformY));
+    int y2tosave=u2logic(dimensionY - (y2+transformY));
+
+    // Get left-top and right-bottom points
+    int rectLeft=min(x1tosave,x2tosave);
+    int rectRight=max(x1tosave,x2tosave);
+    int rectTop=max(y1tosave,y2tosave);
+    int rectBottom=min(y1tosave,y2tosave);
+
+    // Save BBOX of the line
+    PrintDWordToFileContent(rectLeft);	
+    PrintDWordToFileContent(rectTop);	
+    PrintDWordToFileContent(rectRight);	
+    PrintDWordToFileContent(rectBottom);
+
+    // Save count of points
+    PrintDWordToFileContent(0x00000002);	
+
+    // Save points
+    PrintDWordToFileContent(x1tosave);	
+    PrintDWordToFileContent(y1tosave);	
+    PrintDWordToFileContent(x2tosave);	
+    PrintDWordToFileContent(y2tosave);
+    recordsCount++;
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Print one partial Wire
+ * @param W
+ */
+void emf_write_piece(UL_WIRE W)
+{
+    if (W.layer != current_layer){ return; }
+
+    if (W.arc)
+    {
+        emfWriteArc(W.arc.x1, W.arc.y1, W.arc.x2, W.arc.y2, W.arc.radius, W.layer,
+         W.arc.width, W.arc.angle1, W.arc.angle2, W.arc.xc, W.arc.yc);
+    }
+    else
+    {
+        emfWriteLine(W.x1, W.y1, W.x2, W.y2, W.layer, W.width);
+    }
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process Wire
+ * @param W
+ */
+void emf_write_wire(UL_WIRE W)
+{
+    if (W.layer != current_layer)	{ return; }	
+
+    if ( W.style == WIRE_STYLE_LONGDASH || W.style == WIRE_STYLE_SHORTDASH || W.style == WIRE_STYLE_DASHDOT )
+    {
+        W.pieces(P)
+        {
+            emf_write_piece(P);           
+        }      
+    }
+    else if (W.arc)
+    {
+        emfWriteArc(W.arc.x1, W.arc.y1, W.arc.x2, W.arc.y2, W.arc.radius, W.layer, 
+         W.arc.width, W.arc.angle1, W.arc.angle2, W.arc.xc, W.arc.yc);	}
+    else
+    {
+        emfWriteLine(W.x1, W.y1, W.x2, W.y2, W.layer, W.width);
+    }
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Process Rectangle
+ * @param R
+ */
+void emf_write_rectangle(UL_RECTANGLE R)
+{
+    if (current_layer != R.layer)	{ return; }
+    emfWriteRect(R.x1, R.y1, R.x2, R.y2, R.angle, R.layer);
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process Vector Text
+ * @param T
+ */
+void emf_write_vector_text(UL_TEXT T)
+{
+    T.wires(W)
+    {
+        emfWritePathLine(W.x1, W.y1, W.x2, W.y2, W.layer, W.width);
+    }
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Process Text.
+ * For now all is converted to vector text.
+ * In future proportional will be added.
+ * @param T
+ */
+void emf_write_text(UL_TEXT T)
+{
+    if (current_layer != T.layer) { return; }
+    emf_write_vector_text(T);
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process Circle.
+ * Isn't filled, used in schematic processing.
+ * @param C
+ */
+void emf_write_circle(UL_CIRCLE C)
+{
+    if (g_used_layers[C.layer]==0) { return; }
+    
+    emfWriteCircle(C.x, C.y, C.radius, C.width, C.layer);
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process Drill
+ * @param x - x coord of center point
+ * @param y - y coord of center point
+ * @param drill - diameter
+ * @param layer - specifies color
+ */
+void emf_write_drill(int x, int y, int drill, int layer)
+{	
+    if (current_layer!=layer) { return; }
+
+    emfWriteDot(x, y, drill, layer);
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Prints shapes from pads and vias
+ * @param x - x coord center point
+ * @param y - y coord center point
+ * @param diameter 
+ * @param shape - type of shape
+ * @param angle - rotation angle
+ * @param layer 
+ */
+void emf_write_restring(int x, int y, int diameter, int shape, int long, real angle, int layer)
+{
+    if(current_layer != layer) return;
+    switch(shape)
+    {
+    case PAD_SHAPE_SQUARE: // Rectangle
+        emfWriteRect(x-diameter/2, y+diameter/2, x+diameter/2, y-diameter/2, angle, layer);
+        break;
+    case PAD_SHAPE_OCTAGON:  // Octagon
+        emfWritePolygonOctagon(diameter, x,y, angle, layer);
+        break;
+    case PAD_SHAPE_LONG: // Rectangle with two circles at vertical edge axis 
+        int rotatedX=rotatePointX(x+diameter/2,  y, x, y, angle);
+        int rotatedY=rotatePointY(x+diameter/2,  y, x, y, angle);
+        emfWriteDot(rotatedX, rotatedY, diameter, layer);
+        emfWriteRect(x-diameter/2, y+diameter/2, x+diameter/2,  y-diameter/2, angle, layer);
+        rotatedX=rotatePointX(x-diameter/2,  y, x, y, angle);
+        rotatedY=rotatePointY(x-diameter/2,  y, x, y, angle);
+        emfWriteDot(rotatedX, rotatedY, diameter, layer);
+        break;
+    case PAD_SHAPE_OFFSET:
+    case PAD_SHAPE_ANNULUS:
+    case PAD_SHAPE_THERMAL:
+    case PAD_SHAPE_ROUND:
+    default:
+            emfWriteDot(x, y, diameter, layer); // Filled circle
+    }
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process Pad
+ * Determines layers to print on depending on flags set.
+ * Shape and diameter is definied for each layer separately.
+ * @param P
+ */
+void emf_write_pad(UL_PAD P)
+{
+    if (P.flags&PAD_FLAG_STOP)
+    {
+        if(current_layer == LAYER_TSTOP){
+            emf_write_restring(P.x, P.y, P.diameter[LAYER_TSTOP], P.shape[LAYER_TSTOP], 100+P.elongation, P.angle, LAYER_TSTOP);
+        }
+        else if(current_layer == LAYER_BSTOP){
+            emf_write_restring(P.x,P.y, P.diameter[LAYER_BSTOP], P.shape[LAYER_BSTOP], 100+P.elongation, P.angle, LAYER_BSTOP);
+        }
+    }
+    
+    // Pad is drawn on PAD layer, but using shape from BOTTOM layer
+    if (current_layer == LAYER_PADS)
+    { 
+        emf_write_restring(P.x, P.y, P.diameter[16], P.shape[16], 100+P.elongation, P.angle, current_layer);
+        emfWriteDot(P.x, P.y, P.drill, 0); // drill
+    }
+
+    // Print pad drill on drill layer
+    if(current_layer == LAYER_DRILLS)
+        emf_write_drill(P.x, P.y, P.drill, LAYER_DRILLS);
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process SMD.
+ * Determines layers to print on depending on flags set.
+ * Shape and diameter is definied for each layer separately.
+ * @param S
+ */
+void emf_write_smd(UL_SMD S)
+{
+    if (S.layer==LAYER_TOP)
+    {
+        if(current_layer == LAYER_TOP ){
+            emfWriteRoundedRect(S.x-S.dx[LAYER_TOP]/2, S.y+S.dy[LAYER_TOP]/2, 
+                        S.x+S.dx[LAYER_TOP]/2, S.y-S.dy[LAYER_TOP]/2, S.angle,current_layer, S.roundness);
+        }
+        else if(current_layer == LAYER_TSTOP && (S.flags & SMD_FLAG_STOP)){
+            emfWriteRoundedRect(S.x-S.dx[LAYER_TSTOP]/2, S.y+S.dy[LAYER_TSTOP]/2,
+                 S.x+S.dx[LAYER_TSTOP]/2, S.y-S.dy[LAYER_TSTOP]/2, S.angle,current_layer, S.roundness);
+        }
+        else if(current_layer == LAYER_TCREAM && (S.flags & SMD_FLAG_CREAM)){
+            emfWriteRoundedRect(S.x-S.dx[LAYER_TCREAM]/2, S.y+S.dy[LAYER_TCREAM]/2,
+                 S.x+S.dx[LAYER_TCREAM]/2, S.y-S.dy[LAYER_TCREAM]/2, S.angle,current_layer, S.roundness);
+        }
+    }
+
+    else if (S.layer==LAYER_BOTTOM)
+    {
+        if(current_layer ==LAYER_BOTTOM ){
+            emfWriteRoundedRect(S.x-S.dx[LAYER_BOTTOM]/2, S.y+S.dy[LAYER_BOTTOM]/2,
+                 S.x+S.dx[LAYER_BOTTOM]/2, S.y-S.dy[LAYER_BOTTOM]/2, S.angle,current_layer, S.roundness);
+        }
+        else if(current_layer == LAYER_BSTOP && (S.flags & SMD_FLAG_STOP)){
+            emfWriteRoundedRect(S.x-S.dx[LAYER_BSTOP]/2, S.y+S.dy[LAYER_BSTOP]/2,
+                 S.x+S.dx[LAYER_BSTOP]/2, S.y-S.dy[LAYER_BSTOP]/2, S.angle,current_layer, S.roundness);
+        }
+        else if(current_layer == LAYER_BCREAM && (S.flags & SMD_FLAG_CREAM)){
+            emfWriteRoundedRect(S.x-S.dx[LAYER_BCREAM]/2, S.y+S.dy[LAYER_BCREAM]/2,
+                 S.x+S.dx[LAYER_BCREAM]/2, S.y-S.dy[LAYER_BCREAM]/2, S.angle,current_layer, S.roundness);
+        }
+    }
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process via.
+ * Determines layers to print on depending on flags set.
+ * Shape and diameter is definied for each layer separately.
+ * @param V
+ */
+void emf_write_via(UL_VIA V)
+{
+    if (V.flags&VIA_FLAG_STOP)
+    {
+        if(current_layer == LAYER_TSTOP){
+            emf_write_restring(V.x, V.y, V.diameter[LAYER_TSTOP],
+                                V.shape[LAYER_TSTOP], 100, 0.0, LAYER_TSTOP);
+        }
+        else if(current_layer == LAYER_BSTOP){
+            emf_write_restring(V.x, V.y, V.diameter[LAYER_BSTOP], 
+                               V.shape[LAYER_BSTOP], 100, 0.0, LAYER_BSTOP);
+        }
+    }
+
+    if (current_layer == LAYER_VIAS)
+    { 
+        emf_write_restring(V.x, V.y, V.diameter[V.end], 
+                    V.shape[V.end], 100, 0.0, current_layer);
+
+        current_layer=-1;
+        emfWriteDot(V.x, V.y, V.drill, -2); 
+        current_layer=LAYER_VIAS;
+    }
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process hole 
+ * @param H
+ */
+void emf_write_hole(UL_HOLE H)
+{
+    emfWriteCircle(H.x, H.y, H.drill/2, 1600, LAYER_DIMENSION);
+    emf_write_drill(H.x, H.y, H.drill, LAYER_HOLES);
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Procsee Segment
+ * @param SEG
+ */
+void emf_write_segment(UL_SEGMENT SEG)
+{
+    int layer = 0;      
+    SEG.wires(W)
+    {
+        layer = W.layer;   
+        //dlgMessageBox("WIRE");   
+        emf_write_wire(W);
+    }
+
+    SEG.junctions(J)
+    {  
+        emfWriteDot(J.x, J.y, J.diameter, layer);
+    }
+
+    SEG.texts(T)
+    {
+        emf_write_text(T);
+    }
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process Polygon
+ * @param P
+ */
+void emf_write_filled_polygon(UL_POLYGON P)
+{
+    if (g_used_layers[P.layer]==0 || P.layer != current_layer)	{ return; }
+
+    emf_write_polygon(P);
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process Bus
+ * @param B
+ */
+void emf_write_bus(UL_BUS B)
+{
+    B.segments(SEG) { emf_write_segment(SEG); }
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process Net
+ * @param N
+ */
+void emf_write_net(UL_NET N)
+{
+    N.segments(SEG) { 
+        emf_write_segment(SEG); 
+    }
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Process Signal
+ * @param S
+ */
+void emf_write_signal(UL_SIGNAL S)
+{
+    S.polygons(P) { 
+            emf_write_filled_polygon(P);
+    }    
+    S.wires(W)    { 
+            emf_write_wire(W);
+    }
+    S.vias(V)     {
+            emf_write_via(V);
+    }    
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process Pin
+ * @param P
+ */
+void emf_write_pin(UL_PIN P)
+{
+    P.wires(W)   {
+            emf_write_wire(W);
+    }
+    P.circles(C) {
+            emf_write_circle(C);
+    }
+    P.texts(T)   {
+            emf_write_text(T);
+    }
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Process frame
+ * @param F
+ */
+void emf_write_frame(UL_FRAME F){
+    if(current_layer == F.layer){
+        F.wires(W){
+            emf_write_wire(W);
+        } 
+        F.texts(T){
+            emf_write_text(T);
+        } 
+    }
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Process Symbol
+ * @param S
+ */
+void emf_write_symbol(UL_SYMBOL S)
+{
+    S.polygons(P)	{
+        emf_write_polygon(P);
+    }
+    S.circles(C) 	{
+        emf_write_circle(C);
+    }
+    S.rectangles(R) {
+        emf_write_rectangle(R);
+    }
+    S.pins(P)   	{
+        emf_write_pin(P);
+    }
+    S.wires(W)  	{
+        emf_write_wire(W);
+    }
+    S.texts(T)  	{
+        emf_write_text(T);
+    }
+    S.frames(F) 	{
+        emf_write_frame(F);
+    }
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process Gate
+ * @param G
+ */
+void emf_write_gate(UL_GATE G)
+{
+    emf_write_symbol(G.symbol);
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process Instance
+ * @param I
+ */
+void emf_write_instance(UL_INSTANCE I)
+{
+    emf_write_gate(I.gate);
+
+    I.texts(T) {
+        emf_write_text(T);
+    }
+
+    I.xrefs(X) { 
+        emf_write_symbol(X.symbol);
+    }
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Process Part
+ * @param P
+ */
+void emf_write_part(UL_PART P)
+{
+    P.instances(I)
+    {
+        emf_write_instance(I);
+    }
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process Contact
+ * @param C
+ */
+void emf_write_contact(UL_CONTACT C)
+{
+    if (C.pad)
+        emf_write_pad(C.pad);
+    else if (C.smd)
+        emf_write_smd(C.smd);
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process Package
+ * @param PKG
+ */
+void emf_write_package(UL_PACKAGE PKG)
+{
+    PKG.polygons(P)   {
+        emf_write_polygon(P);
+    }
+
+    PKG.rectangles(R) {
+        emf_write_rectangle(R);
+    }
+
+    PKG.wires(W)      {
+        emf_write_wire(W);
+    }
+
+    PKG.circles(C)    {
+        emf_write_circle(C);
+    }
+
+    PKG.texts(T)      {
+        emf_write_text(T);
+    }
+
+    PKG.contacts(C)   {
+        emf_write_contact(C);
+    }
+
+    PKG.holes(H)      {
+        emf_write_hole(H);
+    }
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Process Element
+ * @param E
+ */
+void emf_write_element(UL_ELEMENT E)
+{
+    E.texts(T) {
+        emf_write_text(T);
+    }
+
+    emf_write_package(E.package);
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Process Dimension
+ * @param D
+ */
+void emf_write_dimension(UL_DIMENSION D)
+{
+    if (g_used_layers[D.layer] == 0){ return; }
+
+    D.texts(T)
+    {
+        emf_write_text(T);
+    }
+
+    D.wires(W)
+    {
+        emf_write_wire(W);
+    }
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Updates visibe schematic layers
+ * @param SCH
+ */
+void update_used_sheet_layers(UL_SCHEMATIC SCH)
+{
+    SCH.layers(L)
+    {
+        int used = L.used;
+        if (g_only_visible)
+        {
+            used &= L.visible;
+        }
+        g_used_layers[L.number]=used;    
+    }
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Writes EMF header to metafile
+ * @param dimX - width in mm
+ * @param dimY - height in mm
+ */
+void writeEmfHeader(int dimX, int dimY){
+    PrintDWord(0x00000001);  // Function number=1
+    PrintDWord(0x0000006C);  // Size
+
+    PrintDWord(0x00000000);  // LBound
+    PrintDWord(0);  // RBound
+    PrintDWord(dimX*TOLOGIC);  // TBound
+    PrintDWord(dimY*TOLOGIC);  // BBound
+
+    PrintDWord(0x00000000);  // LFrame
+    PrintDWord(0);  // RFrame
+    PrintDWord(dimX*100);  // TFrame
+    PrintDWord(dimY*100);  // BFrame
+
+    PrintDWord(0x464D4520);  // Signature
+    PrintDWord(0x00010000);  // Version
+
+    PrintWordToFileContent(0x0003);	// Handles (0 for disk)
+    PrintWordToFileContent(0x0000);	// Reserved
+
+    PrintDWordToFileContent(0x00000000);  // Num Words In Description
+    PrintDWordToFileContent(0x00000000);  // OffDescription
+
+    PrintDWordToFileContent(0x00000000);  // PalEntries
+
+    PrintDWordToFileContent(dimX*3.779527559);  // DevWidthPixel
+    PrintDWordToFileContent(dimY*3.779527559);  // DevHeightPixel
+
+    PrintDWordToFileContent(dimX);  // DevWidthMM
+    PrintDWordToFileContent(dimY);  // DevHeightMM
+
+    PrintDWordToFileContent(0x00000000);  // cbPixelFormat 0x00000000
+    PrintDWordToFileContent(0x00000000);  // offPixelFormat 0x00000000
+
+    PrintDWordToFileContent(0x00000000);  // bOpenGL 0x00000001 is ON
+
+    //specify the horizontal and vertical size of the reference device, in micrometers.
+    PrintDWordToFileContent(dimX*1000);  
+    PrintDWordToFileContent(dimY*1000); 
+
+    //------END OF STANDART HEADER --------------------
+    PrintDWordToFileContent(0x00000011);
+    PrintDWordToFileContent(0x0000000C);
+    PrintDWordToFileContent(0x00000008);  // MAP MODE
+    recordsCount++;
+
+    PrintDWordToFileContent(0x0000000B);
+    PrintDWordToFileContent(0x00000010);
+    PrintDWordToFileContent(100);
+    PrintDWordToFileContent(100); //EMR_SETVIEWPORTEXTEX
+    recordsCount++;
+
+    PrintDWordToFileContent(0x00000009);
+    PrintDWordToFileContent(0x00000010);
+    PrintDWordToFileContent(25.4 * TOLOGIC);
+    PrintDWordToFileContent(25.4 * TOLOGIC); //EMR_SETWINDOWEXTEX 
+    recordsCount++;
+
+    PrintDWordToFileContent(0x0000000C);
+    PrintDWordToFileContent(0x00000010);
+    PrintDWordToFileContent(0x00000000);
+    PrintDWordToFileContent(0x00000000); //EMR_SETVIEWPORTORGEX
+    recordsCount++;
+
+    PrintDWordToFileContent(0x0000000A);
+    PrintDWordToFileContent(0x00000010);
+    PrintDWordToFileContent(0x00000000);
+    PrintDWordToFileContent(0x00000000); //EMR_SETWINDOWORGEX
+    recordsCount++;
+
+    PrintDWordToFileContent(0x00000014);
+    PrintDWordToFileContent(0x0000000C);
+    PrintDWordToFileContent(0x0000000D); //EMR_SETROP2
+    recordsCount++;
+
+    PrintDWordToFileContent(0x00000012);
+    PrintDWordToFileContent(0x0000000C);
+    PrintDWordToFileContent(0x00000001); //EMR_SETBKMODE 
+    recordsCount++;
+
+    PrintDWordToFileContent(0x0000001E);
+    PrintDWordToFileContent(0x00000018);
+    PrintDWordToFileContent(0x00000000);
+    PrintDWordToFileContent(0x00000000);
+    PrintDWordToFileContent(dimX*TOLOGIC-1);
+    PrintDWordToFileContent(dimY*TOLOGIC-1); //EMR_INTERSECTCLIPRECT
+    recordsCount++;
+	
+    /*PrintDWordToFileContent(0x00000021);
+    PrintDWordToFileContent(0x00000008); //EMR_SAVEDC 
+    recordsCount++;*/
+	
+    setPen(0,0);
+    setBrush(0);
+
+    // EMR_POLYGON - background
+    PrintDWordToFileContent(0x00000003);
+    PrintDWordToFileContent(0x00000044);
+    PrintDWordToFileContent(0x00000000);
+    PrintDWordToFileContent(0x00000000);
+    PrintDWordToFileContent(dimX*TOLOGIC);
+    PrintDWordToFileContent(dimY*TOLOGIC);
+    PrintDWordToFileContent(0x00000005);
+    PrintDWordToFileContent(0x00000000);
+    PrintDWordToFileContent(0x00000000);
+    PrintDWordToFileContent(dimX*TOLOGIC);
+    PrintDWordToFileContent(0x00000000);
+    PrintDWordToFileContent(dimX*TOLOGIC);
+    PrintDWordToFileContent(dimY*TOLOGIC);
+    PrintDWordToFileContent(0x00000000);
+    PrintDWordToFileContent(dimY*TOLOGIC);
+    PrintDWordToFileContent(0x00000000);
+    PrintDWordToFileContent(0x00000000);
+    recordsCount++;	
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Creates EMF schematic sheet header
+ * @param SH - sheet to print
+ */
+void emf_write_sheet_header(UL_SHEET SH)
+{
+    // Global variables for transformation 
+    dimensionX    = SH.area.x2-SH.area.x1;
+    dimensionY    = SH.area.y2-SH.area.y1;
+
+    transformX=-SH.area.x1;
+    transformY=-SH.area.y1;
+
+    // Print EMR_HEADER
+    writeEmfHeader(u2mm(dimensionX)+1, u2mm(dimensionY)+1);
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Write EMF sheet footer
+ */
+void emf_write_sheet_footer()
+{
+    recordsCount+=2;	// add two records = footer + header
+
+    PrintDWord(19*4+fileContentSize);  // Bytes in File 
+    PrintDWord(recordsCount); //RecordsCount
+    
+    // Printf whole metafile buffer
+    for(int i = 0; i < fileContentSize; i++){
+            printf("%c",fileContent[i]);
+    }
+
+    PrintDWord(0x0000000E);  // footer
+    PrintDWord(0x00000014);  // Size, without pal = 20
+    PrintDWord(0x00000000);  // NumPalEntries
+    PrintDWord(0x00000010);  // OffPalEntries
+    PrintDWord(0x00000014);  // OffToEOF, without pal = 20	
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Write one schematic sheet
+ * @param fileName - output filename
+ * @param addNum - id of sheet 
+ * @param SH - UL_SHEET
+ */
+void write_emf_one_sheet(string fileName, int addNum, UL_SHEET SH){
+    
+        // Adds current sheet unique prefix
+	string completeFilename=fileName;
+	if(addNum != 0){
+		int suffixPos=strstr(fileName, ".emf");
+		completeFilename=strsub(fileName, 0, suffixPos);
+		sprintf(completeFilename, "%s_sheet_%d.emf", completeFilename, SH.number);
+	}
+
+        // opens binary stream to output file
+	output(completeFilename, "Fwb")
+	{
+			
+		emf_write_sheet_header(SH); // writes header
+
+		schematic(SCH){
+                    // iterate over all layers
+                    SCH.layers(L){
+                        current_layer = L.number;
+                        // if current layer is not visible - ignore
+                        if(g_used_layers[current_layer]){	
+                            // Process all schematic shapes
+                            SH.wires(W)      {emf_write_wire(W);}        
+                            SH.nets(N)       {emf_write_net(N);}
+                            SH.busses(B)     {emf_write_bus(B);}
+                            SH.rectangles(R) {emf_write_rectangle(R);}
+                            SH.polygons(P)   {emf_write_polygon(P);}
+                            SH.circles(C)    {emf_write_circle(C);}
+                            SH.parts(P)      {emf_write_part(P);}
+                            SH.frames(F)      { emf_write_frame(F);}
+                            SH.texts(T)      {emf_write_text(T);}
+                        }
+                    }
+		}
+
+		emf_write_sheet_footer(); // write EMF footer
+	}
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Write schematic to metafile
+ * @param fileName - output filename
+ */
+void write_emf_sheet(string fileName)
+{
+
+    schematic(SCH)
+    {
+        int sheetCount=0;
+
+        // Update visible layers
+        update_used_sheet_layers(SCH);
+
+        // Iterate over sheets to get count
+        SCH.sheets(SH)
+        {
+           sheetCount++;
+        }
+
+        // If there is only one sheet, print it
+        if(sheetCount == 1){
+            SCH.sheets(SH)
+            {
+                write_emf_one_sheet(fileName, 0, SH);
+            }	
+        } // If there are more sheets, but user wants just current one 
+        else if(g_only_current_sheet){ 
+            sheet(SH){
+                write_emf_one_sheet(fileName, 0, SH);
+            }			
+        }
+        else{
+            // print all sheets one by one. Filename gets prefix 
+            // _sheet$index before extension
+            SCH.sheets(SH)
+            {
+                fileContentSize=0;
+                recordsCount=0;
+                write_emf_one_sheet(fileName, 1, SH);
+            }
+        }
+    }
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Updates visible layers
+ * @param B
+ */
+void update_used_board_layers(UL_BOARD B)
+{
+    B.layers(L)
+    {
+        int used = L.used;
+        if (g_only_visible)
+        {
+                used &= L.visible;
+        }
+        g_used_layers[L.number]=used;
+    }
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Write board header
+ * @param B
+ */
+void emf_write_board_header(UL_BOARD B)
+{
+    // Save dimensions in globals for transformation
+    dimensionX    = B.area.x2-B.area.x1;
+    dimensionY    = B.area.y2-B.area.y1;
+
+    transformX=-B.area.x1;
+    transformY=-B.area.y1;
+
+    // Write EMF header
+    writeEmfHeader(u2mm(dimensionX)+1, u2mm(dimensionY)+1);
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Iterates over all board structures
+ * @param B
+ */
+void iterateShapesBoard(UL_BOARD B){
+    B.circles(C)    {emf_write_circle(C);}
+    B.rectangles(R) {emf_write_rectangle(R);}
+    B.polygons(P)   {emf_write_filled_polygon(P);}
+    B.signals(S)    {emf_write_signal(S);} 
+    B.wires(W)      {emf_write_wire(W);}
+    B.elements(E)   {emf_write_element(E);}
+    B.holes(H)      {emf_write_hole(H);}
+    B.dimensions(D) {emf_write_dimension(D);}
+    B.texts(T)      {emf_write_text(T);}
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Returns 1 if speacial order was specified for layer
+ * @param layerNum - layer number to check
+ * @return 
+ */
+int specialLayer(int layerNum){
+    // Layers to be printed first
+    for(int i = 0; i < firstLayersCount; i++){
+        if(layerNum == firstLayers[i]) return 1;
+    }
+     // Layers to be printed last
+    for(i = 0; i < lastLayersCount; i++){
+        if(layerNum == lastLayers[i]) return 1;
+    }
+    return 0;
+}
+//---------------------------------------------------------------------------------------
+
+/**
+ * Process board
+ * @param fileName - output filename
+ */
+void write_emf_board(string fileName)
+{
+    // open binary stream to output file
+    output(fileName, "Fwb")
+    {
+        if(board)
+        {
+            board(B)
+            {
+                update_used_board_layers(B); // update used board layers
+                emf_write_board_header(B);  // write board header
+                int layersAll[];
+                int count=0;
+
+                // Count all layers
+                B.layers(L){
+                    layersAll[count++]=L.number;
+                }
+
+                // Print layers that were set to be printed first
+                for(int i = 0; i < firstLayersCount; i++){
+                    current_layer = firstLayers[i];
+                    if(g_used_layers[current_layer]!=0){
+                            iterateShapesBoard(B);
+                    }
+                }
+
+                // Print layers without order specification. From top to bottom
+                for(i = count-1; i >=0; i--)
+                {
+                    current_layer = layersAll[i];
+
+                    if(specialLayer(current_layer)) continue;
+
+                    if(g_used_layers[current_layer]!=0){
+                            iterateShapesBoard(B);
+                    }
+                }
+
+                // Print layers that were set to be printed last
+                for(i = 0; i < lastLayersCount; i++){
+                    current_layer = lastLayers[i];
+                    if(g_used_layers[current_layer]!=0){
+                            iterateShapesBoard(B);
+                    }
+                }
+ 
+                // Print board footer
+                emf_write_sheet_footer();
+            }
+        }  
+    }   
+}
+//---------------------------------------------------------------------------------------
+
+/*******************************************************************************
+ *
+ *
+ *                START OF GUI MOD
+ *
+ *
+ *
+ ******************************************************************************/
+
+string prj_name;   // filename retrieved from file dialog
+
+
+/**
+ * Returns path retrieved from file dialog.
+ * Default path is current project path.
+ * @param startPath
+ */
+void openProjectPath(string startPath)
+{
+    string dirName = "";
+    string stringArray[];
+    dirName = dlgDirectory("Select a directory", startPath); // open dialog
+
+    if( dirName != "" )
+    {
+        if(schematic){
+            schematic(S)
+            {
+                int n = 0;
+                string tmpName = S.name; 
+                int nr = strsplit(stringArray, tmpName, '/');
+                prj_name = dirName + "/" + stringArray[nr-1];
+                // Replace schematic path extension
+                prj_name = strsub(prj_name , 0, strlen(prj_name) - 4) + ".emf"; 
+            }
+        }else{
+            board(S)
+            {
+                int n = 0;
+                string tmpName = S.name; 
+                int nr = strsplit(stringArray, tmpName, '/');
+                prj_name = dirName + "/" + stringArray[nr-1];
+                // Replace board path extension
+                prj_name = strsub(prj_name , 0, strlen(prj_name) - 4) + ".emf";
+            }
+        }
+    }
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ * Main GUI dialog 
+ * @param titleStr
+ * @return 
+ */
+int displayDialog(string titleStr)
+{
+    int space = 10;
+    int result = dlgDialog(titleStr)
+    {
+        dlgVBoxLayout
+        {
+            dlgVBoxLayout
+            {
+                dlgHBoxLayout dlgSpacing(500);
+                dlgStretch(0);
+                dlgSpacing(space);
+                dlgLabel("Export to file:");
+                dlgStretch(0);
+                
+                dlgHBoxLayout
+                {
+                    dlgSpacing(space);
+                    dlgStringEdit(prj_name);
+                    dlgSpacing(space);
+                    dlgPushButton("Choose") openProjectPath("C:\\");
+                    dlgSpacing(space);
+                }
+                dlgHBoxLayout
+                {
+                    dlgVBoxLayout
+                    { 
+                        if(schematic){
+                                dlgCheckBox("Only current sheet", g_only_current_sheet);
+                        }
+                        dlgCheckBox("Only visible layers", g_only_visible);					
+                    }
+                    dlgVBoxLayout
+                    {
+                       // dlgLabel("READ USAGE INFO!");
+                    }
+                }
+                dlgStretch(10);
+                dlgLabel("Developed by romansichkaruk@gmail.com");
+            }
+            dlgStretch(0);
+            dlgHBoxLayout
+            {
+                dlgStretch(1);
+                dlgPushButton("+OK") dlgAccept();
+                dlgSpacing(space);
+                dlgPushButton("-Cancel") dlgReject();
+                dlgStretch(0);
+                dlgSpacing(space);
+            }
+            dlgStretch(10);
+        }
+    };
+    return result;
+}
+//---------------------------------------------------------------------------------------
+
+
+/**
+ *   Main program logic
+ */
+string ref;
+string titleStr;
+
+sprintf(titleStr, "Export Eagle to EMF, Version: %.1f", VERSION); // Title
+
+if (schematic) // Process schematic
+{
+    schematic(S) 
+    {
+        sheet(SH)
+        {
+            sprintf(prj_name, "%s.emf", strsub(S.name, 0, strlen(S.name) - 4));
+        }
+    }
+    if(displayDialog(titleStr))
+    {
+        write_emf_sheet(prj_name);
+    }
+    exit(EXIT_SUCCESS);
+}
+else if (board) // Process board
+{
+    board(B)
+    {
+        sprintf(prj_name,  "%s.emf", strsub(B.name, 0, strlen(B.name) - 4));    
+    }
+    if(displayDialog(titleStr))
+    {
+        write_emf_board(prj_name);
+    }
+    exit(EXIT_SUCCESS);
+}
+else
+{
+    exit(EXIT_FAILURE);
+}
+//---------------------------------------------------------------------------------------
